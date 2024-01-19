@@ -913,7 +913,7 @@ Arguments:
             }
 
             options.timeout = timeout;
-            options.threads = options.devices.size() * 2;
+            options.threads = 1; // options.devices.size() * 2;
             return std::make_shared<::c10d::ProcessGroupGloo>(
                 store, rank, size, options);
           }),

@@ -25,7 +25,8 @@
 #include <gloo/gather.h>
 #include <gloo/reduce.h>
 #include <gloo/scatter.h>
-
+// fix
+#include<stdio.h>
 #include <ATen/SparseTensorUtils.h>
 
 #ifdef USE_CUDA
@@ -1177,6 +1178,8 @@ class AsyncSparseAllreduceWork : public ProcessGroupGloo::AsyncWork {
   }
 };
 
+#define USE_CUDA
+
 #ifdef USE_CUDA
 
 class AsyncAllreduceCUDAWork : public AsyncAllreduceWork {
@@ -1185,52 +1188,57 @@ class AsyncAllreduceCUDAWork : public AsyncAllreduceWork {
       const std::shared_ptr<gloo::Context>& context,
       std::vector<at::Tensor>& inputs,
       ReduceOp reduceOp,
-      uint32_t tag)
-      : AsyncAllreduceWork(context, inputs, reduceOp, tag) {
-    initializeStreamsEvents(inputs, streams, events);
+      uint32_t currentTag, uint32_t currentSplitID,
+      uint32_t nextTag, uint32_t nextSplitID,
+      P4NIC::Smart *smartObj)
+      : AsyncAllreduceWork(context, inputs, reduceOp, currentTag), 
+      currentTag(currentTag), currentSplitID(currentSplitID), 
+      nextTag(nextTag), nextSplitID(nextSplitID), smartObj(smartObj) {
+    const auto& scalarType = inputs[0].scalar_type();
 
-    // Kick off copy from CUDA tensors to pinned CPU tensors.
-    tmp.reserve(inputs.size());
-    at::cuda::OptionalCUDAStreamGuard guard;
-    for (size_t i = 0; i < inputs.size(); i++) {
-      guard.reset_stream(streams[i]);
-      tmp.push_back(pinnedLike(inputs[i]).copy_(inputs[i], true));
+    if (reduceOp == ReduceOp::SUM && (scalarType == ::at::ScalarType::Float)) {
+      if(inputs.size()!=1) {
+        throw std::invalid_argument("AllReduce tensor number not equal to 1");
+      }
+      events.resize(1);
+      at::cuda::OptionalCUDAGuard guard;
+      guard.set_index(inputs[0].device().index());
+      events[0].record(at::cuda::getCurrentCUDAStream());
+      use_smartreduce=true;
+    }
+    else {
+      use_smartreduce=false;
+      throw std::invalid_argument("Unimplemented SmartReduce support");
     }
   }
 
   void run() override {
-    // Synchronize with copy operations.
-    at::cuda::OptionalCUDAGuard device_guard;
-    for (size_t i = 0; i < inputs.size(); i++) {
-      device_guard.set_index(inputs[i].device().index());
-      AT_CUDA_CHECK(cudaStreamSynchronize(streams[i]));
-    }
+    // no need for smartreduce implementation to sync on cpu
+    
+    printf("Running task info----currentTag: %u, currentSplitID: %u, nextTag: %u, nextSplitID: %u, ElementNum: %ld\n", currentTag, currentSplitID, nextTag, nextSplitID, inputs.at(0).numel());
 
-    // Run allreduce on host side tensors.
-    allreduce(tmp);
+    uint64_t currentTagID = ((uint64_t)currentTag << 32) | currentSplitID;
+    uint64_t nextTagID = ((uint64_t)nextTag << 32) | nextSplitID;
 
-    at::cuda::OptionalCUDAStreamGuard stream_guard;
-    for (size_t i = 0; i < inputs.size(); i++) {
-      stream_guard.reset_stream(streams[i]);
-      inputs[i].copy_(tmp[i], /* non_blocking */ true);
-      events[i].record(streams[i]);
-    }
+    smartObj->AllReduceEnd2End((int *) inputs.at(0).data_ptr(), (int *) inputs.at(0).data_ptr(), inputs.at(0).numel(), currentTagID, nextTagID, events[0]);
 
     outputs_ = inputs;
   }
 
   void synchronize() override {
-    // Synchronize with the copy back to CUDA tensors.
-    at::cuda::OptionalCUDAGuard guard;
-    for (size_t i = 0; i < inputs.size(); i++) {
-      guard.set_index(inputs[i].device().index());
-      events[i].block(at::cuda::getCurrentCUDAStream());
-    }
+    printf("Synchronizing task info----currentTag: %u, currentSplitID: %u\n", currentTag, currentSplitID);
+    return;
   }
 
-  std::vector<at::Tensor> tmp;
-  std::vector<at::cuda::CUDAStream> streams;
   std::vector<at::cuda::CUDAEvent> events;
+
+  bool use_smartreduce;
+  P4NIC::Smart *smartObj;
+
+  uint32_t currentTag;
+  uint32_t currentSplitID;
+  uint32_t nextTag;
+  uint32_t nextSplitID;
 };
 
 class AsyncSparseAllreduceCUDAWork : public AsyncSparseAllreduceWork {
@@ -1343,11 +1351,45 @@ std::shared_ptr<ProcessGroup::Work> ProcessGroupGloo::allreduce(
 #ifdef USE_CUDA
   } else if (device.type() == at::kCUDA) {
     if (layout == c10::kStrided) {
-      work = std::make_shared<AsyncAllreduceCUDAWork>(
-          std::move(context), inputs, opts.reduceOp, tag);
-    } else if (layout == c10::kSparse) {
-      work = std::make_shared<AsyncSparseAllreduceCUDAWork>(
-          std::move(context), inputs, tag);
+      assert(inputs[0].dim() == 1);
+      auto total_element_num = inputs[0].numel();
+      std::vector<int64_t> split_sizes;
+      const int64_t split_bound = 32*1024*1024;
+
+      printf("Submit AllReduce task----Tag: %u, totalElementNum: %ld\n", tag, total_element_num);
+
+      while(true) {
+        if(total_element_num < split_bound * 2) {
+          split_sizes.push_back(total_element_num);
+          break;
+        }
+        else {
+          split_sizes.push_back(split_bound);
+          total_element_num -= split_bound;
+        }
+      }
+
+      printf("Split Task %u into %lu subtasks\n", tag, split_sizes.size());
+      for(int i=0; i<split_sizes.size(); i++) {
+        printf("Subtask %d size: %ld\n", i, split_sizes[i]);
+      }
+
+      auto split_tensors = inputs[0].split_with_sizes(split_sizes, 0);
+
+      for(int i=0; i<split_tensors.size(); i++) {
+        std::vector<at::Tensor> split_tensor{split_tensors[i]};
+        if(i < split_tensors.size() - 1) {
+          work = std::make_shared<AsyncAllreduceCUDAWork>(
+            context, split_tensor, opts.reduceOp, tag, i, tag, i+1, &smartObj);
+          enqueue(std::move(work));
+        } else {
+          work = std::make_shared<AsyncAllreduceCUDAWork>(
+            std::move(context), split_tensor, opts.reduceOp, tag, i, tag+1, 0, &smartObj);
+          enqueue(work);
+        }
+      }
+      
+      return work;
     } else {
       invalidArgument("unsupported layout");
     }

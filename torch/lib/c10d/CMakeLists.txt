@@ -76,6 +76,12 @@ if(USE_C10D_GLOO)
 endif()
 
 add_library(c10d STATIC ${C10D_SRCS})
+
+
+target_link_directories(c10d PUBLIC /home/yzh/4P4NIC/cmake-build-debug--amax2/src/)
+target_include_directories(c10d PUBLIC /home/yzh/4P4NIC/include/)
+target_link_libraries(c10d PUBLIC 4p4nic)
+
 set_property(TARGET c10d PROPERTY POSITION_INDEPENDENT_CODE ON)
 set_property(TARGET c10d PROPERTY CXX_STANDARD 14)
 

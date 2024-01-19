@@ -25,6 +25,8 @@
 #include <c10d/Types.hpp>
 #include <c10d/Utils.hpp>
 
+#include "4p4nic/collectives.h"
+
 namespace c10d {
 
 // ProcessGroupGloo implements Gloo bindings for c10d.
@@ -235,6 +237,7 @@ class ProcessGroupGloo : public ProcessGroup {
   // In order to use more than one device (or allow for parallelism on
   // a single device), you need multiple contexts.
   std::vector<std::shared_ptr<::gloo::Context>> contexts_;
+  P4NIC::Smart smartObj;
   std::vector<std::thread> threads_;
   bool stop_;
 
