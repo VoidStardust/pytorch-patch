@@ -575,6 +575,8 @@ ProcessGroupGloo::ProcessGroupGloo(
     throw std::runtime_error("No device(s) specified");
   }
 
+  printf("ProcessGroupGloo Thread Number: %d\n", options.threads);
+
   // Create and connect a context for every device.
   //
   // Note that the same device can be specified multiple times, either
@@ -1219,6 +1221,9 @@ class AsyncAllreduceCUDAWork : public AsyncAllreduceWork {
 
     uint64_t currentTagID = ((uint64_t)currentTag << 32) | currentSplitID;
     uint64_t nextTagID = ((uint64_t)nextTag << 32) | nextSplitID;
+
+    at::cuda::OptionalCUDAGuard guard;
+    guard.set_index(inputs[0].device().index());
 
     smartObj->AllReduceEnd2End((int *) inputs.at(0).data_ptr(), (int *) inputs.at(0).data_ptr(), inputs.at(0).numel(), currentTagID, nextTagID, events[0]);
 
