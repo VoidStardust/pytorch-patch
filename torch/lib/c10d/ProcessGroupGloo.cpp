@@ -1206,6 +1206,7 @@ class AsyncAllreduceCUDAWork : public AsyncAllreduceWork {
       at::cuda::OptionalCUDAGuard guard;
       guard.set_index(inputs[0].device().index());
       events[0].record(at::cuda::getCurrentCUDAStream());
+      smartObj->trySetPhaseTag(currentTag);
       use_smartreduce=true;
     }
     else {
@@ -1232,6 +1233,7 @@ class AsyncAllreduceCUDAWork : public AsyncAllreduceWork {
 
   void synchronize() override {
     printf("Synchronizing task info----currentTag: %u, currentSplitID: %u\n", currentTag, currentSplitID);
+    smartObj->clearPhaseTag();
     return;
   }
 
