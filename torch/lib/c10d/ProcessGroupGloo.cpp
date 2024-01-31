@@ -577,6 +577,8 @@ ProcessGroupGloo::ProcessGroupGloo(
 
   printf("ProcessGroupGloo Thread Number: %d\n", options.threads);
 
+  smartObj.setMaxThreadNum(options.threads);
+
   // Create and connect a context for every device.
   //
   // Note that the same device can be specified multiple times, either
@@ -1218,7 +1220,7 @@ class AsyncAllreduceCUDAWork : public AsyncAllreduceWork {
   void run() override {
     // no need for smartreduce implementation to sync on cpu
     
-    printf("Running task info----currentTag: %u, currentSplitID: %u, nextTag: %u, nextSplitID: %u, ElementNum: %ld\n", currentTag, currentSplitID, nextTag, nextSplitID, inputs.at(0).numel());
+    // printf("Running task info----currentTag: %u, currentSplitID: %u, nextTag: %u, nextSplitID: %u, ElementNum: %ld\n", currentTag, currentSplitID, nextTag, nextSplitID, inputs.at(0).numel());
 
     uint64_t currentTagID = ((uint64_t)currentTag << 32) | currentSplitID;
     uint64_t nextTagID = ((uint64_t)nextTag << 32) | nextSplitID;
@@ -1226,13 +1228,18 @@ class AsyncAllreduceCUDAWork : public AsyncAllreduceWork {
     at::cuda::OptionalCUDAGuard guard;
     guard.set_index(inputs[0].device().index());
 
-    smartObj->AllReduceEnd2End((int *) inputs.at(0).data_ptr(), (int *) inputs.at(0).data_ptr(), inputs.at(0).numel(), currentTagID, nextTagID, events[0]);
+    try {
+      smartObj->AllReduceEnd2End((int *) inputs.at(0).data_ptr(), (int *) inputs.at(0).data_ptr(), inputs.at(0).numel(), currentTagID, nextTagID, (cudaEvent_t)events[0]);
+    } catch (std::exception& e) {
+      printf("Exception caught in AllReduceEnd2End: %s\n", e.what());
+      throw e;
+    }
 
     outputs_ = inputs;
   }
 
   void synchronize() override {
-    printf("Synchronizing task info----currentTag: %u, currentSplitID: %u\n", currentTag, currentSplitID);
+    // printf("Synchronizing task info----currentTag: %u, currentSplitID: %u\n", currentTag, currentSplitID);
     smartObj->clearPhaseTag();
     return;
   }
@@ -1358,12 +1365,19 @@ std::shared_ptr<ProcessGroup::Work> ProcessGroupGloo::allreduce(
 #ifdef USE_CUDA
   } else if (device.type() == at::kCUDA) {
     if (layout == c10::kStrided) {
-      assert(inputs[0].dim() == 1);
-      auto total_element_num = inputs[0].numel();
+       auto total_element_num = inputs[0].numel();
+      // printf("Submit AllReduce task----Tag: %u, totalElementNum: %ld\n", tag, total_element_num);
+      // assert(inputs[0].dim() == 1);
+      if(inputs[0].is_contiguous() == false) {
+        throw std::invalid_argument("AllReduce tensor not contiguous");
+      }
+
+      if(inputs[0].dim() != 1) {
+        throw std::invalid_argument("AllReduce tensor dim not equal to 1");
+      }
+      
       std::vector<int64_t> split_sizes;
       const int64_t split_bound = 32*1024*1024;
-
-      printf("Submit AllReduce task----Tag: %u, totalElementNum: %ld\n", tag, total_element_num);
 
       while(true) {
         if(total_element_num < split_bound * 2) {
@@ -1376,10 +1390,10 @@ std::shared_ptr<ProcessGroup::Work> ProcessGroupGloo::allreduce(
         }
       }
 
-      printf("Split Task %u into %lu subtasks\n", tag, split_sizes.size());
-      for(int i=0; i<split_sizes.size(); i++) {
-        printf("Subtask %d size: %ld\n", i, split_sizes[i]);
-      }
+      // printf("Split Task %u into %lu subtasks\n", tag, split_sizes.size());
+      // for(int i=0; i<split_sizes.size(); i++) {
+      //   printf("Subtask %d size: %ld\n", i, split_sizes[i]);
+      // }
 
       auto split_tensors = inputs[0].split_with_sizes(split_sizes, 0);
 
